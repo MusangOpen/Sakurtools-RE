@@ -10,14 +10,16 @@
 | `native/server/lifecycle.cpp` | 监听生命周期、A 连接获取、主线程等待门、登录超时 |
 | `native/server/transport.cpp` | Netty 通道初始化、协议切换、native 回调和局域网公告 |
 | `native/server/login.cpp` | B 登录、世界快照交接、玩家身份初始化 |
+| `native/server/configuration.cpp` | 1.20.2+ 配置阶段：ProtocolInfo 编解码器切换、用 A 的注册表重建配置载荷、生成的 Context/BiConsumer 实现 |
+| `native/server/player_info.cpp` | 用公开构造函数组装单条 PlayerInfoUpdate，不手写字节流 |
 | `native/server/forwarding.cpp` | B 收包分发、实时转发、Bundle 展开、TAB 映射 |
 | `native/server/teams.cpp` | 初始化和实时队伍包共用的 JNI 转换，保留队伍参数，不修改 A 的原包 |
 | `native/team_state.h` | 记录发往 B 的队伍归属，映射 A/B 成员名，过滤重复或过期的退队操作；由 dispatchMutex 保护，每次登录重置 |
-| `native/server/bindings.cpp` | 按协议、通道、玩家、缓冲区等分组解析 JNI 映射 |
+| `native/server/bindings.cpp` | 按协议、通道、玩家、缓冲区等分组解析 JNI 映射；版本能力探测（`modernNetworking`、`configurationPhase` 等）也在这里 |
 | `native/server/bindings.h` | DLL 生命周期内保留的类引用和方法、字段 ID |
-| `native/server/state.h` | 运行状态、连接、锁、等待条件、玩家身份 |
+| `native/server/state.h` | 运行状态、连接、锁、等待条件、玩家身份、B 的协议阶段 |
 | `native/server/internal.h` | 仅供服务器内部文件调用的接口 |
-| `native/world_snapshot.cpp` | 在游戏主线程读取世界并构建初始化数据包 |
+| `native/world_snapshot.cpp` | 在游戏主线程读取世界并构建初始化数据包；每个包先试新版构造再退回 1.20.1 构造 |
 | `native/packet_policy.h` | A/B 上行包的控制权与心跳归属规则 |
 | `native/relay_handler.cpp` | A 的 Netty 入口及转发旁路标记 |
 | `native/jni_lookup.cpp` | 类名读取及按描述符进行的兼容查找 |

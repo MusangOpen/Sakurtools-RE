@@ -58,6 +58,9 @@ public:
                         u2 maxStack,
                         u2 maxLocals);
 
+    // Interfaces the generated class implements. Call before build().
+    void addInterface(std::string_view internalName) { interfaces_.emplace_back(internalName); }
+
     void setAccessFlags(u2 flags) { access_flags_ = flags; }
 
     std::vector<u1> build();
@@ -78,6 +81,7 @@ private:
 
     std::string this_internal_;
     std::string super_internal_;
+    std::vector<std::string> interfaces_;
     u2          major_version_;
     u2          access_flags_ = ACC_PUBLIC | ACC_SUPER;
 

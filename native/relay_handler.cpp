@@ -8,6 +8,7 @@
 #include "runtime_gate.h"
 
 #include <atomic>
+#include <cstring>
 #include <cstdio>
 #include <mutex>
 #include <string>

@@ -21,6 +21,53 @@ void setChannelAttr(JNIEnv* env, jobject channel, jfieldID keyFid, jclass keyOwn
     env->DeleteLocalRef(key);
 }
 
+// 1.21.9+ keeps two placeholder codecs ("decoder"/"encoder", or "inbound_config"/"outbound_config"
+// on memory connections) in the pipeline; a protocol change replaces them with codecs bound to the
+// target ProtocolInfo. 1.20.1 instead keeps one codec pair that reads the ConnectionProtocol
+// attribute, so the legacy path below only has to update the attribute.
+static jobject findHandler(JNIEnv* env, jobject pipeline, const char* name) {
+    jstring nm = env->NewStringUTF(name);
+    jobject handler = env->CallObjectMethod(pipeline, server.refs.pipelineGetHandlerMid, nm);
+    env->DeleteLocalRef(nm);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return nullptr;
+    }
+    return handler;
+}
+
+static bool replaceCodec(JNIEnv* env, jobject pipeline, const char* primary, const char* alternate, jclass handlerCls,
+                         jmethodID ctor, jobject info) {
+    if (!info)
+        return true;
+    jobject handler = env->NewObject(handlerCls, ctor, info);
+    if (!handler || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    const char* chosen = nullptr;
+    for (const char* name : {primary, alternate}) {
+        if (!name)
+            continue;
+        jstring from = env->NewStringUTF(name);
+        jstring to = env->NewStringUTF(name);
+        env->CallObjectMethod(pipeline, server.refs.pipelineReplaceMid, from, to, handler);
+        env->DeleteLocalRef(from);
+        env->DeleteLocalRef(to);
+        if (!env->ExceptionCheck()) {
+            chosen = name;
+            break;
+        }
+        env->ExceptionClear();
+    }
+    env->DeleteLocalRef(handler);
+    if (!chosen) {
+        LogTo("setProtocolState: no '%s' handler to replace", primary);
+        return false;
+    }
+    return true;
+}
+
 void setProtocolState(JNIEnv* env, jobject channel, jobject protoValue) {
     if (!channel || !protoValue)
         return;
@@ -36,13 +83,9 @@ void setProtocolState(JNIEnv* env, jobject channel, jobject protoValue) {
     }
 
     for (const char* handlerName : {"encoder", "decoder"}) {
-        jstring nm = env->NewStringUTF(handlerName);
-        jobject handler = env->CallObjectMethod(pipeline, server.refs.pipelineGetHandlerMid, nm);
-        env->DeleteLocalRef(nm);
-        if (!handler || env->ExceptionCheck()) {
-            env->ExceptionClear();
+        jobject handler = findHandler(env, pipeline, handlerName);
+        if (!handler)
             continue;
-        }
         jclass hCls = env->GetObjectClass(handler);
 
         jmethodID sp = findMethodByDescriptor(hCls, "(Lnet/minecraft/network/ConnectionProtocol;)V", false);
@@ -112,10 +155,19 @@ void JNICALL Native_ServerInit_initChannel(JNIEnv* env, jobject, jobject ch) {
 
     setProtocolState(env, ch, server.refs.protoHandshaking);
 
-    env->CallStaticVoidMethod(server.refs.connectionCls, server.refs.connectionConfigureSerMid, pipeline,
-                              server.refs.flowServerbound);
+    // 1.21.9+ installs framing plus placeholder codecs through the four-argument overload; the
+    // handshake codec is then installed by applyProtocolState.
+    if (server.refs.connectionConfigureSerializationModernMid) {
+        env->CallStaticVoidMethod(server.refs.connectionCls, server.refs.connectionConfigureSerializationModernMid,
+                                  pipeline, server.refs.flowServerbound, JNI_FALSE, (jobject) nullptr);
+    } else {
+        env->CallStaticVoidMethod(server.refs.connectionCls, server.refs.connectionConfigureSerMid, pipeline,
+                                  server.refs.flowServerbound);
+    }
     if (env->ExceptionCheck()) {
         LogAndClearException(env, "  configureSerialization");
+    } else if (server.refs.connectionConfigureSerializationModernMid) {
+        applyProtocolState(env, ch, server.refs.protoHandshaking);
     }
 
     bool haveBundlerInfo = (server.refs.bundlerProviderFid != nullptr && server.refs.bundlerInfoCls != nullptr);

@@ -18,6 +18,8 @@ add_native_test(team_state team_state_test.cpp)
 add_native_test(class_editor edit_self_test.cpp
     "${PROJECT_SOURCE_DIR}/native/classfile.cpp"
     "${PROJECT_SOURCE_DIR}/native/class_edit.cpp")
+add_native_test(class_interface class_interface_test.cpp
+    "${PROJECT_SOURCE_DIR}/native/classfile.cpp")
 
 # Requires local Minecraft jars, so invoked separately by test_snapshot_native.ps1.
 add_executable(snapshot_jni_test snapshot_jni_test.cpp)

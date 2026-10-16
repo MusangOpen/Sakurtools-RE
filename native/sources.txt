@@ -10,6 +10,8 @@ native/relay_handler.cpp
 native/connection_hook.cpp
 native/server/state.cpp
 native/server/bindings.cpp
+native/server/configuration.cpp
+native/server/player_info.cpp
 native/server/transport.cpp
 native/server/lifecycle.cpp
 native/server/login.cpp

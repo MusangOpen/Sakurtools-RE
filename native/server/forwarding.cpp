@@ -26,47 +26,13 @@ void routeToA(JNIEnv* env, jobject packet) {
 }
 
 void mirrorPlayerInfoUpdateToB(JNIEnv* env, jobject ch, jobject packet) {
-    if (!server.refs.playerInfoUpdatePacketCls || !server.refs.playerInfoUpdatePacketBufCtor ||
-        !server.refs.playerInfoUpdatePacketWriteMid || !server.refs.friendlyBufCls || !server.refs.friendlyBufCtor ||
-        !server.refs.unpooledCls || !server.refs.unpooledBufferMid || !server.refs.byteBufGetByteMid ||
-        !server.refs.listSizeMid || !server.refs.listGetMid || !server.refs.piuEntriesMidA ||
-        !server.refs.piEntryProfileIdMid || !server.refs.fbbWriteByteMid || !server.refs.fbbWriteVarIntMid ||
-        !server.refs.fbbWriteUUIDMid || !server.refs.fbbWriteBooleanMid)
+    if (!server.refs.playerInfoUpdatePacketCls || !server.refs.listSizeMid || !server.refs.listGetMid ||
+        !server.refs.piuEntriesMidA || !server.refs.piEntryProfileIdMid)
         return;
-    if (!server.aPlayer.ready || !server.bPlayer.ready || !server.bPlayer.uuid)
+    if (!server.aPlayer.ready || !server.bPlayer.ready || !server.bPlayer.uuid || !server.bPlayer.name)
         return;
     if (!env->IsInstanceOf(packet, server.refs.playerInfoUpdatePacketCls))
         return;
-
-    jobject bb0 = env->CallStaticObjectMethod(server.refs.unpooledCls, server.refs.unpooledBufferMid);
-    if (!bb0 || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        return;
-    }
-    jobject sbuf = env->NewObject(server.refs.friendlyBufCls, server.refs.friendlyBufCtor, bb0);
-    env->DeleteLocalRef(bb0);
-    if (!sbuf || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        return;
-    }
-    env->CallVoidMethod(packet, server.refs.playerInfoUpdatePacketWriteMid, sbuf);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(sbuf);
-        return;
-    }
-    jint bits = env->CallByteMethod(sbuf, server.refs.byteBufGetByteMid, (jint)0) & 0xFF;
-    env->DeleteLocalRef(sbuf);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        return;
-    }
-
-    bool hasGameMode = bits & 0x04;
-    bool hasListed = bits & 0x08;
-    bool hasLatency = bits & 0x10;
-    bool hasDisplay = bits & 0x20;
-    int outBits = (hasGameMode ? 0x04 : 0) | (hasListed ? 0x08 : 0) | (hasLatency ? 0x10 : 0) | (hasDisplay ? 0x20 : 0);
 
     jobject listA = env->CallObjectMethod(packet, server.refs.piuEntriesMidA);
     if (env->ExceptionCheck()) {
@@ -122,85 +88,43 @@ void mirrorPlayerInfoUpdateToB(JNIEnv* env, jobject ch, jobject packet) {
     if (!aEntry)
         return;
 
-    if (outBits == 0) {
-        env->DeleteLocalRef(aEntry);
-        return;
-    }
-
-    jobject bb = env->CallStaticObjectMethod(server.refs.unpooledCls, server.refs.unpooledBufferMid);
-    if (!bb || env->ExceptionCheck()) {
+    jobject gameMode = server.refs.piEntryGameModeMid ? env->CallObjectMethod(aEntry, server.refs.piEntryGameModeMid)
+                                                      : nullptr;
+    if (env->ExceptionCheck()) {
         env->ExceptionClear();
-        env->DeleteLocalRef(aEntry);
-        return;
+        gameMode = nullptr;
     }
-    jobject buf = env->NewObject(server.refs.friendlyBufCls, server.refs.friendlyBufCtor, bb);
-    env->DeleteLocalRef(bb);
-    if (!buf || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(aEntry);
-        return;
-    }
-
-    env->CallObjectMethod(buf, server.refs.fbbWriteByteMid, (jint)outBits);
-    env->CallObjectMethod(buf, server.refs.fbbWriteVarIntMid, (jint)1);
-    env->CallObjectMethod(buf, server.refs.fbbWriteUUIDMid, server.bPlayer.uuid);
-
-    if (hasGameMode && server.refs.piEntryGameModeMid && server.refs.gameTypeGetIdMid) {
-        jobject gm = env->CallObjectMethod(aEntry, server.refs.piEntryGameModeMid);
-        jint id = 0;
-        if (gm && !env->ExceptionCheck())
-            id = env->CallIntMethod(gm, server.refs.gameTypeGetIdMid);
-        if (gm)
-            env->DeleteLocalRef(gm);
-        if (env->ExceptionCheck())
-            env->ExceptionClear();
-        env->CallObjectMethod(buf, server.refs.fbbWriteVarIntMid, id);
-    }
-    if (hasListed) {
-        // Mirrored updates must never add B as a second visible TAB entry.
-        env->CallObjectMethod(buf, server.refs.fbbWriteBooleanMid, (jboolean)JNI_FALSE);
-    }
-    if (hasLatency && server.refs.piEntryLatencyMid) {
-        jint lat = env->CallIntMethod(aEntry, server.refs.piEntryLatencyMid);
+    jint latency = 0;
+    if (server.refs.piEntryLatencyMid) {
+        latency = env->CallIntMethod(aEntry, server.refs.piEntryLatencyMid);
         if (env->ExceptionCheck()) {
             env->ExceptionClear();
-            lat = 0;
+            latency = 0;
         }
-        env->CallObjectMethod(buf, server.refs.fbbWriteVarIntMid, lat);
-    }
-    if (hasDisplay) {
-        jobject dn = server.refs.piEntryDisplayNameMid
-                         ? env->CallObjectMethod(aEntry, server.refs.piEntryDisplayNameMid)
-                         : nullptr;
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            dn = nullptr;
-        }
-
-        if (dn && server.refs.fbbWriteComponentMid) {
-            env->CallObjectMethod(buf, server.refs.fbbWriteBooleanMid, (jboolean)JNI_TRUE);
-            env->CallObjectMethod(buf, server.refs.fbbWriteComponentMid, dn);
-        } else {
-            env->CallObjectMethod(buf, server.refs.fbbWriteBooleanMid, (jboolean)JNI_FALSE);
-        }
-        if (dn)
-            env->DeleteLocalRef(dn);
-        if (env->ExceptionCheck())
-            env->ExceptionClear();
     }
     env->DeleteLocalRef(aEntry);
 
-    jobject pkt = env->NewObject(server.refs.playerInfoUpdatePacketCls, server.refs.playerInfoUpdatePacketBufCtor, buf);
-    env->DeleteLocalRef(buf);
-    if (!pkt || env->ExceptionCheck()) {
-        LogAndClearException(env, "mirror: single-entry ctor");
+    // B keeps A's game mode, latency and display name but is never added as a second visible entry.
+    jobject profile = env->NewObject(server.refs.gameProfileCls, server.refs.gameProfileCtor, server.bPlayer.uuid,
+                                     server.bPlayer.name);
+    if (!profile || env->ExceptionCheck()) {
+        LogAndClearException(env, "mirror/profile");
+        if (gameMode)
+            env->DeleteLocalRef(gameMode);
         return;
     }
-    env->CallObjectMethod(ch, server.refs.channelWriteAndFlushMid, pkt);
+    jobject mirrored = buildPlayerInfoUpdate(env, kPiuGameMode | kPiuListed | kPiuLatency, server.bPlayer.uuid,
+                                             profile, JNI_FALSE, latency, gameMode, nullptr);
+    env->DeleteLocalRef(profile);
+    if (gameMode)
+        env->DeleteLocalRef(gameMode);
+    if (!mirrored)
+        return;
+    env->CallObjectMethod(ch, server.refs.channelWriteAndFlushMid, mirrored);
     if (env->ExceptionCheck())
         LogAndClearException(env, "mirror: writeAndFlush");
-    env->DeleteLocalRef(pkt);
-    LogTo("mirror: single-entry PlayerInfoUpdate to B (bits=0x%02x)", outBits);
+    env->DeleteLocalRef(mirrored);
+    LogTo("mirror: single-entry PlayerInfoUpdate to B (latency=%d)", latency);
 }
 
 void writeClientPacket(JNIEnv* env, jobject ch, jobject packet) {
@@ -369,6 +293,45 @@ void handleClientPacket(JNIEnv* env, jobject ctx, jobject msg) {
         return;
     }
 
+    if (server.clientState.load(std::memory_order_acquire) == ClientState::Configuring) {
+        // 1.20.2+ configuration phase. B's own configuration answers belong to its connection, not
+        // to A's, so only the two protocol switches are acted upon.
+        if (!server.configurationStarted && server.refs.loginAckPacketCls &&
+            env->IsInstanceOf(msg, server.refs.loginAckPacketCls)) {
+            std::lock_guard<std::recursive_mutex> dispatch(server.dispatchMutex);
+            server.configurationStarted = true;
+            beginConfigurationPhase(env, ch);
+            LogTo("BServer: B acknowledged the login phase; channel switched to CONFIGURATION");
+            if (server.midSession.load(std::memory_order_acquire)) {
+                if (!synthesizeConfigurationPhase(env, ch)) {
+                    LogTo("BServer: configuration handoff failed; closing B");
+                    env->CallObjectMethod(ch, server.refs.channelCloseMid);
+                    LogAndClearException(env, "configuration/close");
+                }
+            } else {
+                // A's own configuration stream is mirrored to B from here on; release A's Render
+                // thread so A can connect and produce it.
+                releaseMainGate(env);
+            }
+            return;
+        }
+        if (isFinishConfigurationPacket(env, msg)) {
+            std::lock_guard<std::recursive_mutex> dispatch(server.dispatchMutex);
+            if (applyProtocolState(env, ch, server.refs.protoPlay)) {
+                LogTo("BServer: B acknowledged configuration; switching channel to PLAY");
+                EnterPlayPhase(env, ch);
+            } else {
+                LogTo("BServer: PLAY codecs unavailable after configuration; closing B");
+                env->CallObjectMethod(ch, server.refs.channelCloseMid);
+                LogAndClearException(env, "configuration/close");
+            }
+            return;
+        }
+        if (packet_policy::isConfigurationPacket(cls) || packet_policy::isCommonPacket(cls) ||
+            packet_policy::isLoginPacket(cls))
+            return;
+    }
+
     std::lock_guard<std::recursive_mutex> dispatch(server.dispatchMutex);
     if (cls == "net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket" &&
         server.refs.teleportAckId) {
@@ -386,7 +349,7 @@ void handleClientPacket(JNIEnv* env, jobject ctx, jobject msg) {
     }
 
     if (server.clientState.load(std::memory_order_acquire) == ClientState::Play) {
-        if (packet_policy::allowFromB(cls)) {
+        if (packet_policy::allowFromB(cls, true)) {
             routeToA(env, msg);
         }
     }
@@ -401,13 +364,20 @@ void BServer_ForwardToB(JNIEnv* env, jobject packet) {
         return;
     std::lock_guard<std::recursive_mutex> dispatch(server.dispatchMutex);
     ClientState state = server.clientState.load(std::memory_order_acquire);
-    if (server.stopping.load() ||
-        (state != ClientState::Play && state != ClientState::Syncing && state != ClientState::AwaitReady))
+    if (server.stopping.load() || (state != ClientState::Play && state != ClientState::Syncing &&
+                                   state != ClientState::AwaitReady && state != ClientState::Configuring))
         return;
 
     std::string cls = JniClassName(env, packet);
-    if (!packet_policy::isGamePacket(cls))
+    // While B is in its configuration phase, A's configuration and common traffic is mirrored too:
+    // those packets carry the registries B needs before PLAY.
+    const bool configuring = state == ClientState::Configuring;
+    bool forwardable = packet_policy::isGamePacket(cls) ||
+                       (configuring && (packet_policy::isConfigurationPacket(cls) || packet_policy::isCommonPacket(cls)));
+    if (!forwardable)
         return;
+    if (configuring && isClientboundFinishConfigurationPacket(env, packet))
+        LogTo("BServer: mirroring A's finish-configuration; waiting for B's acknowledgement");
     if (state == ClientState::Syncing) {
         if (server.handoff.state() != LoginHandoff::State::Capturing)
             return;

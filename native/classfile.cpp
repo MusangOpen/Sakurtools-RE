@@ -162,6 +162,10 @@ std::vector<u1> ClassBuilder::build() {
 
     u2 thisClass  = classRef(this_internal_);
     u2 superClass = classRef(super_internal_);
+    std::vector<u2> interfaces;
+    interfaces.reserve(interfaces_.size());
+    for (const std::string& name : interfaces_)
+        interfaces.push_back(classRef(name));
 
     std::vector<u1> out;
     out.reserve(256);
@@ -180,7 +184,9 @@ std::vector<u1> ClassBuilder::build() {
     be16(out, access_flags_);
     be16(out, thisClass);
     be16(out, superClass);
-    be16(out, 0);
+    be16(out, static_cast<u2>(interfaces.size()));
+    for (u2 index : interfaces)
+        be16(out, index);
 
     be16(out, 0);
 

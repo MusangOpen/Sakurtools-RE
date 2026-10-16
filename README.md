@@ -1,14 +1,25 @@
 # SakuraTools
 
-Minecraft 1.20.1 的 C++ 客户端代理。A 持有远端连接，B 连接本地 25565 端口；中途接入时先同步当前世界，再交接操作。
+Minecraft 1.20.1 / 1.21.10 的 C++ 客户端代理。A 持有远端连接，B 连接本地 25565 端口；中途接入时先同步当前世界，再交接操作。
+
+同一个 DLL 通过运行时能力探测同时支持 1.20.1（Forge，SRG 成员名，无配置阶段）与
+1.21.10（NeoForge 21.10.x，Mojang 名称，LOGIN → CONFIGURATION → PLAY）。移植过程、依据与验证状态见
+[1.21.10 移植说明](docs/port-1.21.10.md)。
+
+版本相关的 JNI 映射由 `tools/mcport/` 数据驱动维护：`mcport.py` 查询类名/成员/描述符/SRG 名并对比两个版本，
+`check_sources.py` 把 `native/` 中所有 JNI 引用对着目标版本体检；用法见移植说明。
 
 ## 开发入口
 
 ```powershell
-./scripts/build.ps1
+./scripts/build.ps1                                   # 正式路径：MSVC + CMake + CTest
+./scripts/build_mingw.ps1                             # 无 MSVC 时的编译/链接回归（MinGW gcc/g++）
+./scripts/build_mingw.ps1 -SkipTests                  # 只编译链接
 ```
 
-脚本自动定位 Visual Studio（需要 C++ 和 CMake 组件），配置、编译并运行测试。产物为 `proxy/Aurora.dll`、`proxy/Compass.exe` 和 `proxy/Prism.dll`，测试产物留在构建目录。现有 JVM 测试需要 JDK 17 或更新版本；仅运行纯 C++ 测试可加 `-WithoutJvmTests`。
+`build.ps1` 自动定位 Visual Studio（需要 C++ 和 CMake 组件），配置、编译并运行测试。产物为 `proxy/Aurora.dll`、`proxy/Compass.exe` 和 `proxy/Prism.dll`，测试产物留在构建目录。现有 JVM 测试需要 JDK 17 或更新版本；仅运行纯 C++ 测试可加 `-WithoutJvmTests`。
+
+`build_mingw.ps1` 是验证路径：用 MinGW 把同一份 `native/sources.txt` 编译链接成 `build/mingw-verify/` 下的三件产物并跑原生测试，便于在没有 VS C++ 工作负载的机器上做编译级回归；发布件仍须用 MSVC 产出。
 
 构建脚本支持 `-BuildDir`、`-Configuration Debug`、`-VisualStudio` 和 `-SkipTests`。正常运行从 `proxy/launcher.ps1` 进入；`scripts/inject.ps1` 只代理到 `proxy/inject.ps1`，注入逻辑仅维护一份。
 

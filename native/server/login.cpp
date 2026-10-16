@@ -98,72 +98,31 @@ void ensureARealUuid(JNIEnv* env) {
     env->DeleteLocalRef(user);
 }
 
-void sendSelfInfoToB(JNIEnv* env, jobject offlineUuid, jstring name) {
-    if (!server.refs.minecraftCls || !server.refs.mcGetInstanceMid || !server.refs.mcGetProfilePropsMid ||
-        !server.refs.friendlyBufCls || !server.refs.friendlyBufCtor || !server.refs.fbbWriteByteMid ||
-        !server.refs.fbbWriteBooleanMid || !server.refs.fbbWriteVarIntMid || !server.refs.fbbWriteUUIDMid ||
-        !server.refs.fbbWriteUtfMid || !server.refs.fbbWriteGpPropsMid || !server.refs.unpooledCls ||
-        !server.refs.unpooledBufferMid || !server.refs.playerInfoUpdatePacketCls ||
-        !server.refs.playerInfoUpdatePacketBufCtor) {
-        LogTo("self-info: missing refs, skipping push");
+void sendSelfInfoToB(JNIEnv* env) {
+    jobject offlineUuid = server.bPlayer.uuid;
+    jstring name = server.bPlayer.name;
+    if (!offlineUuid || !name) {
+        LogTo("self-info: B identity not ready, skipping push");
         return;
     }
-    jobject mc = env->CallStaticObjectMethod(server.refs.minecraftCls, server.refs.mcGetInstanceMid);
-    if (!mc || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        LogTo("self-info: no Minecraft");
+    jobject profile = nullptr;
+    if (server.refs.gameProfileCls && server.refs.gameProfileCtor)
+        profile = env->NewObject(server.refs.gameProfileCls, server.refs.gameProfileCtor, offlineUuid, name);
+    if (!profile || env->ExceptionCheck()) {
+        LogAndClearException(env, "self-info/profile");
+        if (profile)
+            env->DeleteLocalRef(profile);
         return;
     }
-    jobject props = env->CallObjectMethod(mc, server.refs.mcGetProfilePropsMid);
-    env->DeleteLocalRef(mc);
-    if (!props || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        LogTo("self-info: no profile props");
+    // Keep B's profile (name/UUID, and its skin on 1.20.1) but list it only once: A's players own
+    // the TAB entries, so the mirrored entry stays unlisted.
+    jobject packet = buildPlayerInfoUpdate(env, kPiuAddPlayer | kPiuGameMode | kPiuListed | kPiuLatency,
+                                           offlineUuid, profile, JNI_FALSE, 0, nullptr, nullptr);
+    env->DeleteLocalRef(profile);
+    if (!packet)
         return;
-    }
-
-    jobject bb = env->CallStaticObjectMethod(server.refs.unpooledCls, server.refs.unpooledBufferMid);
-    if (!bb || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(props);
-        return;
-    }
-    jobject buf = env->NewObject(server.refs.friendlyBufCls, server.refs.friendlyBufCtor, bb);
-    env->DeleteLocalRef(bb);
-    if (!buf || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(props);
-        return;
-    }
-
-    env->CallObjectMethod(buf, server.refs.fbbWriteByteMid, (jint)0x1D);
-    env->CallObjectMethod(buf, server.refs.fbbWriteByteMid, (jint)0x01);
-    env->CallObjectMethod(buf, server.refs.fbbWriteUUIDMid, offlineUuid);
-
-    env->CallObjectMethod(buf, server.refs.fbbWriteUtfMid, name, (jint)16);
-    env->CallVoidMethod(buf, server.refs.fbbWriteGpPropsMid, props);
-
-    env->CallObjectMethod(buf, server.refs.fbbWriteVarIntMid, (jint)0);
-
-    // Keep B's profile for its skin, but show only the server's players in TAB.
-    env->CallObjectMethod(buf, server.refs.fbbWriteBooleanMid, (jboolean)JNI_FALSE);
-
-    env->CallObjectMethod(buf, server.refs.fbbWriteVarIntMid, (jint)0);
-    env->DeleteLocalRef(props);
-    if (env->ExceptionCheck()) {
-        LogAndClearException(env, "self-info: buffer build");
-        env->DeleteLocalRef(buf);
-        return;
-    }
-
-    jobject pkt = env->NewObject(server.refs.playerInfoUpdatePacketCls, server.refs.playerInfoUpdatePacketBufCtor, buf);
-    env->DeleteLocalRef(buf);
-    if (!pkt || env->ExceptionCheck()) {
-        LogAndClearException(env, "self-info: packet ctor");
-        return;
-    }
-    writeToB(env, pkt);
-    env->DeleteLocalRef(pkt);
+    writeToB(env, packet);
+    env->DeleteLocalRef(packet);
     LogTo("self-info: pushed B's own player-info to B (unlisted, A's skin)");
 }
 
@@ -220,6 +179,73 @@ bool reconstructAndSendLoginToB(JNIEnv* env, jobject ch) {
     LogTo("mid-login: snapshot queued packets=%d elapsed=%lldms", (int)count,
           (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)
               .count());
+    return true;
+}
+
+// A's Render thread waits on this gate until B is far enough along to receive A's join stream.
+// On 1.20.2+ that moment is the start of B's configuration phase, because the configuration payload
+// itself comes from A connecting.
+void releaseMainGate(JNIEnv*) {
+    {
+        std::lock_guard<std::mutex> lock(server.gateMutex);
+        server.clientConnected = true;
+    }
+    server.gateChanged.notify_all();
+    LogTo("login: released A's Render thread — A now connects and its live join stream feeds B");
+}
+
+// B reached PLAY. Send its own TAB entry, then either hand over A's world snapshot (mid-session) or
+// simply start forwarding A's play stream.
+bool EnterPlayPhase(JNIEnv* env, jobject ch) {
+    sendSelfInfoToB(env);
+    if (!server.midSession.load(std::memory_order_acquire)) {
+        server.clientState.store(ClientState::Play, std::memory_order_release);
+        return true;
+    }
+    if (!ch)
+        return false;
+    LogTo("mid-login: rebuilding login for B from A's state");
+    server.clientState.store(ClientState::Syncing, std::memory_order_release);
+    if (!reconstructAndSendLoginToB(env, ch)) {
+        LogTo("mid-login: reconstruction failed; closing B instead of entering empty PLAY");
+        env->CallObjectMethod(ch, server.refs.channelCloseMid);
+        if (env->ExceptionCheck())
+            LogAndClearException(env, "mid-login/close");
+        return false;
+    }
+    {
+        std::lock_guard<std::recursive_mutex> dispatch(server.dispatchMutex);
+        if (server.stopping.load())
+            return false;
+        if (!server.handoff.snapshotSent()) {
+            server.handoff.fail();
+            BServer_CheckLoginTimeout(env);
+            return false;
+        }
+        server.clientState.store(ClientState::AwaitReady, std::memory_order_release);
+        std::vector<jobject> pending;
+        pending.swap(server.pendingPackets);
+        for (jobject packet : pending) {
+            BServer_ForwardToB(env, packet);
+            env->DeleteGlobalRef(packet);
+        }
+    }
+    jobject channel;
+    {
+        std::lock_guard<std::mutex> lock(server.clientMutex);
+        channel = server.clientChannel ? env->NewLocalRef(server.clientChannel) : nullptr;
+    }
+    if (channel) {
+        jclass type = env->GetObjectClass(channel);
+        jmethodID flush = env->GetMethodID(type, "flush", "()Lio/netty/channel/Channel;");
+        if (flush)
+            env->CallObjectMethod(channel, flush);
+        if (env->ExceptionCheck())
+            env->ExceptionClear();
+        env->DeleteLocalRef(type);
+        env->DeleteLocalRef(channel);
+    }
+    LogTo("mid-login: snapshot sent; waiting for B initialization acknowledgement");
     return true;
 }
 
@@ -285,6 +311,13 @@ void completeLogin(JNIEnv* env, jobject hello) {
         server.teams = TeamState{};
         if (server.bPlayer.name) env->DeleteGlobalRef(server.bPlayer.name);
         server.bPlayer.name = static_cast<jstring>(env->NewGlobalRef(jname));
+        if (server.bPlayer.uuid) env->DeleteGlobalRef(server.bPlayer.uuid);
+        server.bPlayer.uuid = static_cast<jobject>(env->NewGlobalRef(uuid));
+        unsigned char bBytes[16];
+        if (uuidToBytes(env, uuid, bBytes)) {
+            std::memcpy(server.bPlayer.uuidBytes, bBytes, 16);
+            server.bPlayer.ready = true;
+        }
         ensureARealUuid(env);
     }
 
@@ -293,82 +326,32 @@ void completeLogin(JNIEnv* env, jobject hello) {
         std::lock_guard<std::mutex> l(server.clientMutex);
         ch = server.clientChannel ? env->NewLocalRef(server.clientChannel) : nullptr;
     }
-    if (ch) {
-        setProtocolState(env, ch, server.refs.protoPlay);
-        LogTo("login: protocol switched to PLAY");
-
-        if (server.midSession.load(std::memory_order_acquire)) {
-            LogTo("login: mid-session — rebuilding login for B from A's state");
-            if (!reconstructAndSendLoginToB(env, ch)) {
-                LogTo("mid-login: reconstruction failed; closing B instead of entering empty PLAY");
-                env->CallObjectMethod(ch, server.refs.channelCloseMid);
-                if (env->ExceptionCheck())
-                    LogAndClearException(env, "mid-login/close");
-                env->DeleteLocalRef(ch);
-                env->DeleteLocalRef(uuid);
-                env->DeleteLocalRef(jname);
-                return;
-            }
-        }
-        env->DeleteLocalRef(ch);
-    }
-
-    sendSelfInfoToB(env, uuid, jname);
-
-    unsigned char bBytes[16];
-    if (uuidToBytes(env, uuid, bBytes)) {
-        std::memcpy(server.bPlayer.uuidBytes, bBytes, 16);
-        server.bPlayer.ready = true;
-    }
-
-    if (server.bPlayer.uuid)
-        env->DeleteGlobalRef(server.bPlayer.uuid);
-    server.bPlayer.uuid = env->NewGlobalRef(uuid);
-
-
-    env->DeleteLocalRef(uuid);
-    env->DeleteLocalRef(jname);
-
-    if (server.midSession.load(std::memory_order_acquire)) {
-        std::lock_guard<std::recursive_mutex> dispatch(server.dispatchMutex);
-        if (server.stopping.load())
-            return;
-        if (!server.handoff.snapshotSent()) {
-            server.handoff.fail();
-            BServer_CheckLoginTimeout(env);
-            return;
-        }
-        server.clientState.store(ClientState::AwaitReady, std::memory_order_release);
-        std::vector<jobject> pending;
-        pending.swap(server.pendingPackets);
-        for (jobject packet : pending) {
-            BServer_ForwardToB(env, packet);
-            env->DeleteGlobalRef(packet);
-        }
-        jobject channel;
-        {
-            std::lock_guard<std::mutex> lock(server.clientMutex);
-            channel = server.clientChannel ? env->NewLocalRef(server.clientChannel) : nullptr;
-        }
-        if (channel) {
-            jclass type = env->GetObjectClass(channel);
-            jmethodID flush = env->GetMethodID(type, "flush", "()Lio/netty/channel/Channel;");
-            if (flush)
-                env->CallObjectMethod(channel, flush);
-            env->DeleteLocalRef(type);
-            env->DeleteLocalRef(channel);
-        }
-        LogTo("mid-login: snapshot sent; waiting for B initialization acknowledgement");
+    if (!ch) {
+        env->DeleteLocalRef(uuid);
+        env->DeleteLocalRef(jname);
         return;
     }
-    server.clientState.store(ClientState::Play, std::memory_order_release);
-    {
-        std::lock_guard<std::mutex> l(server.gateMutex);
-        server.clientConnected = true;
+
+    if (server.refs.configurationPhase) {
+        // 1.20.2+: B answers the login phase with ServerboundLoginAcknowledgedPacket and only then
+        // switch the codecs. The acknowledgement arrives while the channel still runs LOGIN, which
+        // is why the switch happens in the packet handler rather than here.
+        server.configurationStarted = false;
+        server.clientState.store(ClientState::Configuring, std::memory_order_release);
+        LogTo("login: B is in LOGIN; waiting for the login acknowledgement before CONFIGURATION");
+    } else {
+        applyProtocolState(env, ch, server.refs.protoPlay);
+        LogTo("login: protocol switched to PLAY");
+        if (server.midSession.load(std::memory_order_acquire)) {
+            EnterPlayPhase(env, ch);
+        } else {
+            server.clientState.store(ClientState::Play, std::memory_order_release);
+            releaseMainGate(env);
+        }
     }
-    server.gateChanged.notify_all();
-    LogTo("login: B in PLAY (empty world); released A's Render thread — A now "
-          "connects and its live join stream feeds B");
+    env->DeleteLocalRef(ch);
+    env->DeleteLocalRef(uuid);
+    env->DeleteLocalRef(jname);
 }
 
 } // namespace proxy_server

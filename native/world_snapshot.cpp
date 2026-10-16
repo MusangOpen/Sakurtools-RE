@@ -4,6 +4,7 @@
 #include "random_name.h"
 #include "runtime_gate.h"
 #include "login_handoff.h"
+#include "server/state.h"
 #include <algorithm>
 #include <cmath>
 #include <condition_variable>
@@ -11,6 +12,7 @@
 #include <mutex>
 
 namespace {
+using proxy_server::server;
 constexpr const char* MC = "net.minecraft.client.Minecraft";
 constexpr const char* LISTENER = "net.minecraft.client.multiplayer.ClientPacketListener";
 constexpr const char* LEVEL = "net.minecraft.client.multiplayer.ClientLevel";
@@ -37,6 +39,122 @@ jmethodID taskCtor = nullptr;
 void releasePackets(JNIEnv* env, std::vector<jobject>& packets) {
     for (jobject packet : packets) env->DeleteGlobalRef(packet);
     packets.clear();
+}
+
+// --- version-adaptive packet construction ------------------------------------------------------
+//
+// 1.20.2 moved the spawn description into CommonPlayerSpawnInfo, 1.21.2 gave the position packet a
+// PositionMoveRotation, 1.21.9 dropped ClientboundAddPlayerPacket and the NonNullList payloads.
+// Each helper tries the constructor the running version declares and returns nullptr when the
+// shape is the older one, in which case the caller uses the 1.20.1 constructor.
+
+// (int playerId, boolean hardcore, Set levels, int maxPlayers, int chunkRadius, int simulationDistance,
+//  boolean reducedDebugInfo, boolean showDeathScreen, boolean doLimitedCrafting, CommonPlayerSpawnInfo, Z)
+jobject makeModernLoginPacket(SnapshotJni& j, JNIEnv* env, jobject level, jobject gameType, jobject levels,
+                              jobject dimension, jobject empty, jint playerId, jint viewRadius) {
+    if (!server.refs.hasCommonSpawnInfo)
+        return nullptr;
+    jobject holder = nullptr;
+    try {
+        holder = j.object(level, LEVEL, "dimensionTypeRegistration", "dimensionTypeRegistration",
+                          "()Lnet/minecraft/core/Holder;");
+    } catch (const std::exception&) {
+        j.clearException();
+        return nullptr;
+    }
+    jint seaLevel = 0;
+    try {
+        seaLevel = j.integer(level, LEVEL, "getSeaLevel", "getSeaLevel", "()I");
+    } catch (const std::exception&) {
+        j.clearException();
+    }
+    jobject spawn = j.optionalMake(
+        PACKET("CommonPlayerSpawnInfo"),
+        "(Lnet/minecraft/core/Holder;Lnet/minecraft/resources/ResourceKey;JLnet/minecraft/world/level/GameType;"
+        "Lnet/minecraft/world/level/GameType;ZZLjava/util/Optional;II)V",
+        holder, dimension, (jlong)0, gameType, (jobject) nullptr, JNI_FALSE, JNI_TRUE, empty, (jint)0, seaLevel);
+    if (!spawn)
+        return nullptr;
+    jobject packet = j.optionalMake(PACKET("ClientboundLoginPacket"),
+                                    "(IZLjava/util/Set;IIIZZZLnet/minecraft/network/protocol/game/"
+                                    "CommonPlayerSpawnInfo;Z)V",
+                                    playerId, JNI_FALSE, levels, (jint)1, viewRadius, viewRadius, JNI_FALSE, JNI_TRUE,
+                                    JNI_FALSE, spawn, JNI_FALSE);
+    env->DeleteLocalRef(spawn);
+    return packet;
+}
+
+// 1.21.9 spawns every entity, players included, through ClientboundAddEntityPacket. The
+// ServerEntity-based constructors are server-only, so the snapshot uses the raw field constructor.
+jobject makeModernAddEntityPacket(SnapshotJni& j, JNIEnv* env, jobject entity) {
+    if (!server.refs.addEntityPacketCtor || !server.refs.entityTypeCls)
+        return nullptr;
+    jobject zero = nullptr;
+    try {
+        zero = j.staticObject("net.minecraft.world.phys.Vec3", "ZERO", "f_82479_", "Lnet/minecraft/world/phys/Vec3;");
+    } catch (const std::exception&) {
+        j.clearException();
+        return nullptr;
+    }
+    jobject type = j.object(entity, ENTITY, "getType", "m_6095_", "()Lnet/minecraft/world/entity/EntityType;");
+    jobject uuid = j.object(entity, ENTITY, "getUUID", "m_20148_", "()Ljava/util/UUID;");
+    jint id = j.integer(entity, ENTITY, "getId", "m_19879_", "()I");
+    jdouble x = j.real(entity, ENTITY, "getX", "m_20185_", "()D");
+    jdouble y = j.real(entity, ENTITY, "getY", "m_20186_", "()D");
+    jdouble z = j.real(entity, ENTITY, "getZ", "m_20189_", "()D");
+    jfloat yRot = j.decimal(entity, ENTITY, "getYRot", "m_146908_", "()F");
+    jfloat xRot = j.decimal(entity, ENTITY, "getXRot", "m_146909_", "()F");
+    jfloat headRot = yRot;
+    try {
+        headRot = j.decimal(entity, ENTITY, "getYHeadRot", "m_146909_", "()F");
+    } catch (const std::exception&) {
+        j.clearException();
+    }
+    jobject packet = j.optionalMake(PACKET("ClientboundAddEntityPacket"),
+                                    "(ILjava/util/UUID;DDDFFLnet/minecraft/world/entity/EntityType;I"
+                                    "Lnet/minecraft/world/phys/Vec3;D)V",
+                                    id, uuid, x, y, z, xRot, yRot, type, (jint)0, zero, (jdouble)headRot);
+    env->DeleteLocalRef(type);
+    env->DeleteLocalRef(uuid);
+    env->DeleteLocalRef(zero);
+    return packet;
+}
+
+// 1.21.9 stores the spawn point as LevelData$RespawnData (position, angles and dimension).
+jobject makeModernSpawnPositionPacket(SnapshotJni& j, jobject level) {
+    if (!server.refs.levelGetRespawnDataMid)
+        return nullptr;
+    jobject respawn = nullptr;
+    try {
+        respawn = j.object(level, LEVEL, "getRespawnData", "getRespawnData",
+                           "()Lnet/minecraft/world/level/storage/LevelData$RespawnData;");
+    } catch (const std::exception&) {
+        j.clearException();
+        return nullptr;
+    }
+    return j.optionalMake(PACKET("ClientboundSetDefaultSpawnPositionPacket"),
+                          "(Lnet/minecraft/world/level/storage/LevelData$RespawnData;)V", respawn);
+}
+
+// 1.21.2 carriers the teleport as a PositionMoveRotation record.
+jobject makeModernPlayerPositionPacket(SnapshotJni& j, JNIEnv* env, jobject player, jobject relatives, jint teleportId) {
+    if (!server.refs.positionMoveRotationOfEntityMid)
+        return nullptr;
+    jobject change = nullptr;
+    try {
+        change = env->CallStaticObjectMethod(server.refs.positionMoveRotationCls,
+                                             server.refs.positionMoveRotationOfEntityMid, player);
+        j.check();
+    } catch (const std::exception&) {
+        j.clearException();
+        return nullptr;
+    }
+    jobject packet = j.optionalMake(PACKET("ClientboundPlayerPositionPacket"),
+                                    "(ILnet/minecraft/world/entity/PositionMoveRotation;Ljava/util/Set;)V", teleportId,
+                                    change, relatives);
+    if (change)
+        env->DeleteLocalRef(change);
+    return packet;
 }
 
 void captureNow(JNIEnv* env, Job& job) {
@@ -70,12 +188,21 @@ void captureNow(JNIEnv* env, Job& job) {
     };
     jobject levels = j.object(listener, LISTENER, "levels", "m_105151_", "()Ljava/util/Set;");
     jobject dimension = j.object(level, LEVEL, "dimension", "m_46472_", "()Lnet/minecraft/resources/ResourceKey;");
-    jobject dimensionType = j.object(level, LEVEL, "dimensionTypeId", "m_220362_", "()Lnet/minecraft/resources/ResourceKey;");
     jobject empty = j.stat("java.util.Optional", "empty", "empty", "()Ljava/util/Optional;");
-    add(j.make(PACKET("ClientboundLoginPacket"),
-        "(IZLnet/minecraft/world/level/GameType;Lnet/minecraft/world/level/GameType;Ljava/util/Set;Lnet/minecraft/core/RegistryAccess$Frozen;Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceKey;JIIIZZZZLjava/util/Optional;I)V",
-        id, JNI_FALSE, gameType, (jobject)nullptr, levels, frozen, dimensionType, dimension,
-        (jlong)0, (jint)1, viewRadius, viewRadius, JNI_FALSE, JNI_TRUE, JNI_FALSE, JNI_FALSE, empty, (jint)0));
+    jobject loginPacket = makeModernLoginPacket(j, env, level, gameType, levels, dimension, empty, id, viewRadius);
+    if (loginPacket) {
+        add(loginPacket);
+    } else {
+        // 1.20.1 layout: the dimension type key and every flag live in the packet itself.
+        jobject dimensionType =
+            j.object(level, LEVEL, "dimensionTypeId", "m_220362_", "()Lnet/minecraft/resources/ResourceKey;");
+        add(j.make(PACKET("ClientboundLoginPacket"),
+            "(IZLnet/minecraft/world/level/GameType;Lnet/minecraft/world/level/GameType;Ljava/util/Set;"
+            "Lnet/minecraft/core/RegistryAccess$Frozen;Lnet/minecraft/resources/ResourceKey;"
+            "Lnet/minecraft/resources/ResourceKey;JIIIZZZZLjava/util/Optional;I)V",
+            id, JNI_FALSE, gameType, (jobject)nullptr, levels, frozen, dimensionType, dimension, (jlong)0, (jint)1,
+            viewRadius, viewRadius, JNI_FALSE, JNI_TRUE, JNI_FALSE, JNI_FALSE, empty, (jint)0));
+    }
     add(j.make(PACKET("ClientboundSetChunkCacheRadiusPacket"), "(I)V", viewRadius));
     add(j.make(PACKET("ClientboundSetChunkCacheCenterPacket"), "(II)V", cx, cz));
     jlong time = j.longValue(level, LEVEL, "getGameTime", "m_46467_", "()J");
@@ -110,10 +237,19 @@ void captureNow(JNIEnv* env, Job& job) {
         jint latency = j.integer(info, infoType, "getLatency", "m_105330_", "()I");
         jobject gm = j.object(info, infoType, "getGameMode", "m_105325_", "()Lnet/minecraft/world/level/GameType;");
         jobject display = j.object(info, infoType, "getTabListDisplayName", "m_105342_", "()Lnet/minecraft/network/chat/Component;");
-        jobject entry = j.make(PACKET("ClientboundPlayerInfoUpdatePacket$Entry"),
-            "(Ljava/util/UUID;Lcom/mojang/authlib/GameProfile;ZILnet/minecraft/world/level/GameType;Lnet/minecraft/network/chat/Component;Lnet/minecraft/network/chat/RemoteChatSession$Data;)V",
-            uuid, profile, visible, latency, gm, display, (jobject)nullptr);
+        jobject entry = j.optionalMake(PACKET("ClientboundPlayerInfoUpdatePacket$Entry"),
+            "(Ljava/util/UUID;Lcom/mojang/authlib/GameProfile;ZILnet/minecraft/world/level/GameType;"
+            "Lnet/minecraft/network/chat/Component;ZILnet/minecraft/network/chat/RemoteChatSession$Data;)V",
+            uuid, profile, visible, latency, gm, display, JNI_FALSE, (jint)0, (jobject)nullptr);
+        if (!entry) {
+            // 1.20.1 entry: no show-hat flag and no list order.
+            entry = j.make(PACKET("ClientboundPlayerInfoUpdatePacket$Entry"),
+                "(Ljava/util/UUID;Lcom/mojang/authlib/GameProfile;ZILnet/minecraft/world/level/GameType;"
+                "Lnet/minecraft/network/chat/Component;Lnet/minecraft/network/chat/RemoteChatSession$Data;)V",
+                uuid, profile, visible, latency, gm, display, (jobject)nullptr);
+        }
         j.boolean(entries, "java.util.Collection", "add", "add", "(Ljava/lang/Object;)Z", entry);
+        env->DeleteLocalRef(entry);
     });
     jobject emptyList = j.stat("java.util.Collections", "emptyList", "emptyList", "()Ljava/util/List;");
     jobject infoPacket = j.make(PACKET("ClientboundPlayerInfoUpdatePacket"), "(Ljava/util/EnumSet;Ljava/util/Collection;)V", actions, emptyList);
@@ -148,12 +284,22 @@ void captureNow(JNIEnv* env, Job& job) {
     jobject entities = j.object(level, LEVEL, "entitiesForRendering", "m_104735_", "()Ljava/lang/Iterable;");
     each(entities, [&](jobject entity) {
         if (env->IsSameObject(entity, player)) return;
-        jobject spawn = env->IsInstanceOf(entity, j.type(PLAYER))
-            ? j.make(PACKET("ClientboundAddPlayerPacket"), "(Lnet/minecraft/world/entity/player/Player;)V", entity)
-            : j.object(entity, ENTITY, "getAddEntityPacket", "m_5654_", "()Lnet/minecraft/network/protocol/Packet;");
-        // Forge custom spawn packets require a modded B handshake, which this proxy does not provide.
-        if (!env->IsInstanceOf(spawn, j.type(PACKET("ClientboundAddEntityPacket"))) &&
-            !env->IsInstanceOf(spawn, j.type(PACKET("ClientboundAddPlayerPacket")))) return;
+        jobject spawn = makeModernAddEntityPacket(j, env, entity);
+        if (!spawn) {
+            spawn = (server.refs.addPlayerPacketCls && env->IsInstanceOf(entity, j.type(PLAYER)))
+                        ? j.make(PACKET("ClientboundAddPlayerPacket"), "(Lnet/minecraft/world/entity/player/Player;)V", entity)
+                        : j.object(entity, ENTITY, "getAddEntityPacket", "m_5654_",
+                                   "()Lnet/minecraft/network/protocol/Packet;");
+        }
+        // Custom spawn packets (modded entities) need a modded B handshake, which this proxy does not
+        // provide; the vanilla entity packet is the only one that is safe to mirror.
+        const bool vanillaSpawn = env->IsInstanceOf(spawn, j.type(PACKET("ClientboundAddEntityPacket"))) ||
+                                  (server.refs.addPlayerPacketCls &&
+                                   env->IsInstanceOf(spawn, server.refs.addPlayerPacketCls));
+        if (!vanillaSpawn) {
+            env->DeleteLocalRef(spawn);
+            return;
+        }
         add(spawn);
         jobject data = j.object(entity, ENTITY, "getEntityData", "m_20088_", "()Lnet/minecraft/network/syncher/SynchedEntityData;");
         jobject values = j.object(data, "net.minecraft.network.syncher.SynchedEntityData", "getNonDefaultValues", "m_252804_", "()Ljava/util/List;");
@@ -172,14 +318,33 @@ void captureNow(JNIEnv* env, Job& job) {
     jint state = j.integer(menu, menuType, "getStateId", "m_182424_", "()I");
     jobject items = j.object(menu, menuType, "getItems", "m_38927_", "()Lnet/minecraft/core/NonNullList;");
     jobject carried = j.object(menu, menuType, "getCarried", "m_142621_", "()Lnet/minecraft/world/item/ItemStack;");
-    add(j.make(PACKET("ClientboundContainerSetContentPacket"), "(IILnet/minecraft/core/NonNullList;Lnet/minecraft/world/item/ItemStack;)V", (jint)0, state, items, carried));
-    jobject spawnPos = j.object(level, LEVEL, "getSharedSpawnPos", "m_220360_", "()Lnet/minecraft/core/BlockPos;");
-    jfloat spawnAngle = j.decimal(level, LEVEL, "getSharedSpawnAngle", "m_220361_", "()F");
-    add(j.make(PACKET("ClientboundSetDefaultSpawnPositionPacket"), "(Lnet/minecraft/core/BlockPos;F)V", spawnPos, spawnAngle));
+    jobject containerPacket = j.optionalMake(PACKET("ClientboundContainerSetContentPacket"),
+                                             "(IILjava/util/List;Lnet/minecraft/world/item/ItemStack;)V", (jint)0, state,
+                                             items, carried);
+    if (!containerPacket) {
+        containerPacket = j.make(PACKET("ClientboundContainerSetContentPacket"),
+                                 "(IILnet/minecraft/core/NonNullList;Lnet/minecraft/world/item/ItemStack;)V", (jint)0,
+                                 state, items, carried);
+    }
+    add(containerPacket);
+    jobject spawnPacket = makeModernSpawnPositionPacket(j, level);
+    if (!spawnPacket) {
+        jobject spawnPos = j.object(level, LEVEL, "getSharedSpawnPos", "m_220360_", "()Lnet/minecraft/core/BlockPos;");
+        jfloat spawnAngle = j.decimal(level, LEVEL, "getSharedSpawnAngle", "m_220361_", "()F");
+        spawnPacket =
+            j.make(PACKET("ClientboundSetDefaultSpawnPositionPacket"), "(Lnet/minecraft/core/BlockPos;F)V", spawnPos,
+                   spawnAngle);
+    }
+    add(spawnPacket);
     jobject relative = j.stat("java.util.Collections", "emptySet", "emptySet", "()Ljava/util/Set;");
-    jfloat yaw = j.decimal(player, ENTITY, "getYRot", "m_146908_", "()F");
-    jfloat pitch = j.decimal(player, ENTITY, "getXRot", "m_146909_", "()F");
-    add(j.make(PACKET("ClientboundPlayerPositionPacket"), "(DDDFFLjava/util/Set;I)V", x, y, z, yaw, pitch, relative, (jint)LoginHandoff::teleportId));
+    jobject positionPacket = makeModernPlayerPositionPacket(j, env, player, relative, (jint)LoginHandoff::teleportId);
+    if (!positionPacket) {
+        jfloat yaw = j.decimal(player, ENTITY, "getYRot", "m_146908_", "()F");
+        jfloat pitch = j.decimal(player, ENTITY, "getXRot", "m_146909_", "()F");
+        positionPacket = j.make(PACKET("ClientboundPlayerPositionPacket"), "(DDDFFLjava/util/Set;I)V", x, y, z, yaw,
+                                pitch, relative, (jint)LoginHandoff::teleportId);
+    }
+    add(positionPacket);
     LogTo("mid-login: native snapshot chunks=%d packets=%zu position=%.2f,%.2f,%.2f", chunkCount, job.packets.size(), x, y, z);
 }
 

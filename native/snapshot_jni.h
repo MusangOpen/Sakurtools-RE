@@ -57,6 +57,42 @@ public:
         if (!result) throw std::runtime_error(std::string("Snapshot field missing: ") + owner + "." + name);
         return result;
     }
+    jfieldID staticField(const char* owner, const char* name, const char* mapped, const char* desc) {
+        jclass cls = type(owner);
+        jfieldID result = env->GetStaticFieldID(cls, name, desc);
+        if (!result && env->ExceptionCheck()) {
+            jthrowable error = env->ExceptionOccurred();
+            env->ExceptionClear();
+            bool missing = env->IsInstanceOf(error, type("java.lang.NoSuchFieldError"));
+            if (missing) result = env->GetStaticFieldID(cls, mapped, desc);
+            else env->Throw(error);
+            env->DeleteLocalRef(error);
+        }
+        check();
+        if (!result) throw std::runtime_error(std::string("Snapshot static field missing: ") + owner + "." + name);
+        return result;
+    }
+    jobject staticObject(const char* owner, const char* name, const char* mapped, const char* desc) {
+        jfieldID id = staticField(owner, name, mapped, desc);
+        jobject result = env->GetStaticObjectField(type(owner), id);
+        check();
+        return result;
+    }
+    // Returns nullptr instead of throwing when a constructor changed between versions; a pending
+    // JNI error would otherwise poison every later call on this thread.
+    template<class... Args> jobject optionalMake(const char* owner, const char* desc, Args... args) {
+        try {
+            return required(env->NewObject(type(owner), method(owner, "<init>", "<init>", desc), args...));
+        } catch (const std::exception&) {
+            if (env->ExceptionCheck())
+                env->ExceptionClear();
+            return nullptr;
+        }
+    }
+    void clearException() {
+        if (env->ExceptionCheck())
+            env->ExceptionClear();
+    }
     template<class... Args> jobject object(jobject target, const char* owner, const char* name,
                                            const char* mapped, const char* desc, Args... args) {
         required(target);
