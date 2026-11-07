@@ -9,6 +9,16 @@ Minecraft 1.20.1 / 1.21.10 的 C++ 客户端代理。A 持有远端连接，B �
 版本相关的 JNI 映射由 `tools/mcport/` 数据驱动维护：`mcport.py` 查询类名/成员/描述符/SRG 名并对比两个版本，
 `check_sources.py` 把 `native/` 中所有 JNI 引用对着目标版本体检；用法见移植说明。
 
+## 仓库
+
+| 项 | 值 |
+| --- | --- |
+| 仓库 | `MusangOpen/Sakurtools-RE`（私有，组织 `MusangOpen`） |
+| 上游 | [GzSakura1338/SakuraTools](https://github.com/GzSakura1338/SakuraTools)，本仓库在其完整历史之上追加移植提交 |
+| remote | `origin` → 本仓库；`upstream` → 上游，`git fetch upstream` 后可直接合并原作者更新 |
+
+默认分支 `main`。组织 owner 与仓库协作者均有写权限；发布件不入库（`proxy/*.dll|exe`、`build/`、`.portcache/` 已在 `.gitignore`）。
+
 ## 开发入口
 
 ```powershell
@@ -19,6 +29,11 @@ Minecraft 1.20.1 / 1.21.10 的 C++ 客户端代理。A 持有远端连接，B �
 
 `build.ps1` 自动定位 Visual Studio（需要 C++ 和 CMake 组件），配置、编译并运行测试。产物为 `proxy/Aurora.dll`、`proxy/Compass.exe` 和 `proxy/Prism.dll`，测试产物留在构建目录。现有 JVM 测试需要 JDK 17 或更新版本；仅运行纯 C++ 测试可加 `-WithoutJvmTests`。
 
+MSVC 路径的前置条件（以 VS 2026 为例，用 `-VisualStudio` 指定安装目录）：
+
+- 工作负载 **使用 C++ 的桌面开发**（`Microsoft.VisualStudio.Workload.NativeDesktop`）
+- 组件 **MSVC x64 生成工具**、**Windows 11 SDK**、**C++ CMake 工具**（`Microsoft.VisualStudio.Component.VC.CMake.Project`，脚本使用 VS 自带 `CMake`/`ctest`/`Ninja`）
+
 `build_mingw.ps1` 是验证路径：用 MinGW 把同一份 `native/sources.txt` 编译链接成 `build/mingw-verify/` 下的三件产物并跑原生测试，便于在没有 VS C++ 工作负载的机器上做编译级回归；发布件仍须用 MSVC 产出。
 
 构建脚本支持 `-BuildDir`、`-Configuration Debug`、`-VisualStudio` 和 `-SkipTests`。正常运行从 `proxy/launcher.ps1` 进入；`scripts/inject.ps1` 只代理到 `proxy/inject.ps1`，注入逻辑仅维护一份。
@@ -27,7 +42,7 @@ Minecraft 1.20.1 / 1.21.10 的 C++ 客户端代理。A 持有远端连接，B �
 
 `scripts/build.sh` 是 Zig 交叉编译入口；`build_bare.sh`、`build_mindll.sh` 和 `mindll/` 用于底层实验，不是日常发布入口。`skid/` 是 Minecraft 参考源码，不参与生产构建。
 
-所有构建入口的 DLL/EXE 成品统一放在项目根目录的 `proxy/`（本机为 `D:\AI\Minecraft\SakuraTools\proxy`），包括实验用 `Aurora_bare.dll`、`Tide.dll`。Debug/Release 不额外创建输出子目录；编译中间文件和测试产物仍留在 `build/`。
+所有构建入口的 DLL/EXE 成品统一放在项目根目录的 `proxy/`，包括实验用 `Aurora_bare.dll`、`Tide.dll`。Debug/Release 不额外创建输出子目录；编译中间文件和测试产物仍留在 `build/`。
 
 ## DEL 停用与再次启用
 
@@ -47,6 +62,15 @@ Minecraft 1.20.1 / 1.21.10 的 C++ 客户端代理。A 持有远端连接，B �
 复测时先重启 A，进入远端服务器，再注入新 `proxy/Aurora.dll`，最后让 B 加入代理。日志应依次出现 `native snapshot chunks=...`、`snapshot sent` 和 `B acknowledged world snapshot`。检查 B 能进入当前区块、位置与 A 一致、移动无持续拉回，并覆盖 B 断开后重新加入的情况。
 
 ## 验证
+
+当前状态（1.21.10 移植提交 `2e7027a`）：
+
+| 项 | 结果 |
+| --- | --- |
+| MSVC 构建 | 49/49 步骤成功，产出 `proxy/Aurora.dll`、`proxy/Prism.dll`、`proxy/Compass.exe` |
+| CTest | 6/6 通过：`login_handoff`、`runtime_gate`、`packet_policy`、`team_state`、`class_editor`、`class_interface` |
+| MinGW 回归 | `scripts/build_mingw.ps1` 三件产物 + 同一批测试全部通过 |
+| 游戏内端到端 | **未验证**（需要真实 1.21.10 客户端，见下方清单） |
 
 在 Visual Studio x64 开发环境中：
 
