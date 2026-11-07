@@ -91,3 +91,15 @@ ctest --test-dir build/msvc --output-on-failure
 此测试使用原版 SRG 类和资源，不能替代 Forge 启动器环境中的双客户端验证。
 
 游戏内验证：A 与 B 建立转发后，在 A 按 DEL，确认 B 断开、25565 关闭且 A 可以继续操作；再次运行注入器并重连 B，确认双向转发恢复。重复测试，并分别覆盖 B 尚未连接、A 已进入服务器、快速重复请求恢复的情况。
+
+## 许可证
+
+本项目以 [Apache License 2.0](LICENSE) 发布；版权与第三方归属见 [NOTICE](NOTICE)。
+
+- 允许商业使用、修改、再分发，需保留版权与许可声明，并附带 NOTICE（若存在）；
+- 包含专利授权条款（第 3 条），同时提供免责声明（第 7、8 条）。
+
+注意事项：上游 [GzSakura1338/SakuraTools](https://github.com/GzSakura1338/SakuraTools) **未声明任何许可证**。
+本仓库的移植与新增代码按 Apache-2.0 发布；若你要再分发**含上游原始代码**的版本，需先取得上游作者授权。
+本项目为第三方客户端工具，与 Mojang Studios / Microsoft 无关。
+
